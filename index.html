@@ -167,9 +167,23 @@
   .chart-container { margin: 15px 0; }
   .timestamp { color: #999; font-size: 12px; }
   .source-note { font-size: 11px; color: #888; margin-top: 2px; font-style: italic; }
+  .nav-bar {
+    background: #2c3e50; padding: 8px 16px; border-radius: 5px; margin-bottom: 15px;
+    display: flex; gap: 16px; align-items: center;
+  }
+  .nav-bar a {
+    color: #ecf0f1; text-decoration: none; font-size: 13px; font-weight: 500;
+    padding: 4px 10px; border-radius: 4px; transition: background 0.2s;
+  }
+  .nav-bar a:hover { background: #34495e; }
+  .nav-bar a.active { background: #2980b9; }
 </style>
 </head>
 <body>
+<div class="nav-bar">
+  <a href="tracker.html">FX + Oil Tracker</a>
+  <a href="index.html" class="active">Oil Shock Simulator</a>
+</div>
 <h1>Oil Shock: EM Effects</h1>
 <p class="timestamp">Gerado em: 2026-03-01 19:57 | Base: $70/bbl</p>
 

@@ -2,7 +2,7 @@
 Choque no Preço do Petróleo — Dashboard de Impacto para Mercados Emergentes
 =============================================================================
 Modelo estrutural calibrado: choque petróleo → inflação + PIB + balança comercial + IRFs
-Países: Chile, México, Colômbia, África do Sul
+Países: Chile, México, Colômbia, Brasil, África do Sul
 Output: Dashboard HTML interativo (Plotly) com 7 abas + simulador de cenários
 Parâmetros calibrados a partir de literatura acadêmica recente (2018-2025).
 """
@@ -125,6 +125,42 @@ COUNTRIES = {
         "fonte_pib": "FLAR (2024); SVAR Redalyc; Ecopetrol fiscal channel",
         "fonte_trade": "DANE (2024); OEC World; ANH Colômbia",
     },
+    "Brasil": {
+        "color": "#FFD700",
+        "oil_position": "mixed",
+        "gdp_nominal_bn": 2100,  # USD bn, IMF WEO 2024
+        # BCB WP 556 (Correa & Minella, 2012): ERPT 0.04-0.08 contemporâneo
+        # BCB Relatório de Inflação (2023): petróleo → IPCA via gasolina (~5% peso) + diesel indireto (~3%)
+        # Petrobras abandonou PPI em 2023 → pricing opaco, dampening short-run pass-through
+        # IDB (2023): Brasil pass-through abaixo da média LatAm por política de preços administrados
+        "headline_passthrough_per_10pct": {"low": 0.15, "mid": 0.25, "high": 0.35},
+        # BCB expectativas ancoradas (meta 3.0% ± 1.5pp), indexação salarial moderada
+        "core_passthrough_ratio": 0.35,
+        # IPEA Carta de Conjuntura: net exporter → efeito PIB próximo de zero ou levemente positivo
+        # BCB SVAR: efeito ambíguo — custo energético vs receita exportadora + fiscal
+        # Oil rents ~3-4% PIB; Petrobras dividendos + royalties significativos para fiscal
+        "gdp_impact_per_10pct": {"low": -0.05, "mid": 0.05, "high": 0.15},
+        "irf_shape": {
+            "headline_peak_q": 3, "core_peak_q": 5, "gdp_peak_q": 4,
+            "decay_half_life_q": 2.5, "full_dissipation_q": 10,
+        },
+        # ToT dominante (exportador líquido de crude); demanda e oferta simétricos
+        "channels": {"demanda": 0.30, "oferta": 0.30, "termos_de_troca": 0.40},
+        "trade": {
+            # ANP (2024): crude exports ~$28-32bn; refined product imports ~$15-18bn
+            # Net oil exporter desde ~2019-2020 (pré-sal ramp-up)
+            "oil_import_bn": 18.0, "oil_export_bn": 32.0,
+            "total_imports_bn": 240.0, "total_exports_bn": 340.0,
+            "oil_import_volume_elasticity_sr": 0.08,
+            "oil_import_volume_elasticity_lr": 0.30,
+            # BRL moderadamente petrocurrency: pré-sal + commodity ToT
+            # Mais fraco que COP (petróleo ~10% exports vs ~30% Colômbia)
+            "fx_oil_beta": -0.04,
+        },
+        "fonte_inflacao": "BCB Relatório de Inflação; BCB WP 556; IPEA; IDB (2023); Petrobras pricing",
+        "fonte_pib": "IPEA Carta de Conjuntura; BCB SVAR; ANP; Min Fazenda/SPE",
+        "fonte_trade": "MDIC/Comex Stat (2024); ANP; OEC World; WITS",
+    },
     "África do Sul": {
         "color": "#27ae60",
         "oil_position": "net_importer",
@@ -163,41 +199,87 @@ LINE_STYLES = {
     "Chile":         {"dash": "solid", "symbol": "circle",      "width": 2.5},
     "México":        {"dash": "solid", "symbol": "square",      "width": 2.5},
     "Colômbia":      {"dash": "dash",  "symbol": "diamond",     "width": 2.5},
+    "Brasil":        {"dash": "dashdot", "symbol": "star",        "width": 2.5},
     "África do Sul": {"dash": "dot",   "symbol": "triangle-up", "width": 3.0},
 }
 
-# ── Dados históricos — Guerra da Ucrânia (invasão 24/Fev/2022) ──────────────
-# Período: 23/Fev (véspera) a 09/Mar/2022 (~2 semanas)
-# Fontes: oil.xlsx (Brent) e fx.xlsx (USDMXN, USDCLP, USDCOP, USDZAR)
+# ── Dados históricos — Choques geopolíticos recentes (2022–2024) ──────────────
+# Fontes: oil.xlsx (Brent) e fx.xlsx (USDMXN, USDCLP, USDCOP, USDBRL, USDZAR)
 
 _DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 
-def _load_ukraine_war_data():
-    """Carrega dados do período da guerra a partir das planilhas oil.xlsx e fx.xlsx."""
-    # Brent
+GEOPOLITICAL_EVENTS = [
+    {"name": "Invasão da Ucrânia",       "eve": "2022-02-23", "shock": "2022-02-24",
+     "desc": "Rússia invade a Ucrânia; Brent dispara nas semanas seguintes"},
+    {"name": "Ataque Hamas–Israel",       "eve": "2023-10-06", "shock": "2023-10-09",
+     "desc": "Ataque do Hamas em 7/Out (sábado); mercado reage na segunda-feira"},
+    {"name": "Houthis — Mar Vermelho",    "eve": "2023-12-15", "shock": "2023-12-18",
+     "desc": "Houthis atacam navios no Mar Vermelho; risco de disrupção logística"},
+    {"name": "Escalada Israel–Líbano",    "eve": "2024-09-27", "shock": "2024-09-30",
+     "desc": "Israel intensifica operações contra Hezbollah no Líbano"},
+]
+
+def _load_geopolitical_data():
+    """Carrega Brent + FX para todos os eventos geopolíticos."""
+    from datetime import timedelta
+
     oil = pd.read_excel(os.path.join(_DATA_DIR, "oil.xlsx"))
     oil["date"] = pd.to_datetime(oil["date"], origin="1899-12-30", unit="D")
-    oil = oil[(oil["date"] >= "2022-02-23") & (oil["date"] <= "2022-03-09")].copy()
+    oil = oil.sort_values("date").set_index("date")
 
-    # FX
     fx = pd.read_excel(os.path.join(_DATA_DIR, "fx.xlsx"))
     fx["Date"] = pd.to_datetime(fx["Date"]).dt.normalize()
-    fx = fx[(fx["Date"] >= "2022-02-23") & (fx["Date"] <= "2022-03-09")].copy()
+    _fx_cols = ["Date", "usdclp", "usdcop", "usdmxn", "usdbrl", "usdzar"]
+    fx = fx[[c for c in _fx_cols if c in fx.columns]]
+    fx = fx.sort_values("Date").set_index("Date")
 
-    # Merge pelo dia (inner join garante só dias com ambos os dados)
-    merged = pd.merge(oil, fx, left_on="date", right_on="Date", how="inner")
-    merged = merged.sort_values("date").reset_index(drop=True)
+    results = []
+    for ev in GEOPOLITICAL_EVENTS:
+        eve_dt = pd.Timestamp(ev["eve"])
+        start = eve_dt - timedelta(days=2)
+        end = eve_dt + timedelta(days=20)
 
-    return {
-        "dates": merged["date"].dt.strftime("%Y-%m-%d").tolist(),
-        "brent": merged["brent"].tolist(),
-        "USDMXN": merged["usdmxn"].tolist(),
-        "USDCLP": merged["usdclp"].tolist(),
-        "USDCOP": merged["usdcop"].tolist(),
-        "USDZAR": merged["usdzar"].tolist(),
-    }
+        oil_slice = oil.loc[start:end, "brent"].dropna()
+        fx_slice = fx.loc[start:end].dropna()
 
-UKRAINE_WAR_DATA = _load_ukraine_war_data()
+        # Merge no inner join de datas
+        merged = pd.DataFrame({"brent": oil_slice}).join(fx_slice, how="inner")
+        merged = merged.sort_index()
+
+        if merged.empty:
+            continue
+
+        dates = merged.index
+        def _closest(target):
+            diffs = abs(dates - target)
+            return diffs.argmin()
+
+        eve_idx = _closest(eve_dt)
+        shock_idx = _closest(pd.Timestamp(ev["shock"]))
+        d7_idx = _closest(eve_dt + timedelta(days=7))
+        d14_idx = _closest(eve_dt + timedelta(days=14))
+
+        snapshots = {
+            "eve": int(eve_idx), "d0": int(shock_idx),
+            "d7": int(d7_idx), "d14": int(d14_idx),
+        }
+
+        results.append({
+            "name": ev["name"],
+            "desc": ev["desc"],
+            "dates": merged.index.strftime("%Y-%m-%d").tolist(),
+            "brent": merged["brent"].tolist(),
+            "USDMXN": merged["usdmxn"].tolist(),
+            "USDCLP": merged["usdclp"].tolist(),
+            "USDCOP": merged["usdcop"].tolist(),
+            "USDZAR": merged["usdzar"].tolist(),
+            "USDBRL": merged["usdbrl"].tolist(),
+            "snap": snapshots,
+        })
+
+    return results
+
+GEOPOLITICAL_DATA = _load_geopolitical_data()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # EUA — PARÂMETROS CALIBRADOS (aba separada, não mistura com EMs)
@@ -486,10 +568,10 @@ def run_us_scenario(target_price):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def plot_inflation_paths(results):
-    """Grid 2x2: headline vs core por país."""
+    """Grid 3x2: headline vs core por país."""
     names = list(results.keys())
-    fig = make_subplots(rows=2, cols=2, subplot_titles=names,
-                        vertical_spacing=0.18, horizontal_spacing=0.10)
+    fig = make_subplots(rows=3, cols=2, subplot_titles=names,
+                        vertical_spacing=0.12, horizontal_spacing=0.10)
 
     for i, name in enumerate(names):
         row, col = divmod(i, 2)
@@ -527,12 +609,12 @@ def plot_inflation_paths(results):
     fig.update_layout(
         title=dict(text=f"Impacto na Inflação ({direction} de {abs(shock):.1f}%)",
                    font=dict(size=15)),
-        height=600, template="plotly_white",
-        legend=dict(orientation="h", yanchor="bottom", y=-0.10, xanchor="center", x=0.5),
+        height=850, template="plotly_white",
+        legend=dict(orientation="h", yanchor="bottom", y=-0.07, xanchor="center", x=0.5),
         margin=dict(t=50, b=80, l=50, r=30),
     )
     fig.update_xaxes(dtick=2)
-    fig.update_xaxes(title_text="Trimestres", row=2)
+    fig.update_xaxes(title_text="Trimestres", row=3)
     fig.update_yaxes(title_text="pp")
     return fig
 
@@ -542,7 +624,7 @@ def plot_inflation_paths(results):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def plot_gdp_paths(results):
-    """Overlay: 4 países num único gráfico."""
+    """Overlay: 5 países num único gráfico."""
     fig = go.Figure()
     for name, r in results.items():
         color = COUNTRIES[name]["color"]
@@ -611,10 +693,10 @@ def plot_gdp_channels(results):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def plot_trade_paths(results):
-    """Grid 2x2: saldo comercial como % do PIB anual por país."""
+    """Grid 3x2: saldo comercial como % do PIB anual por país."""
     names = list(results.keys())
-    fig = make_subplots(rows=2, cols=2, subplot_titles=names,
-                        vertical_spacing=0.18, horizontal_spacing=0.10)
+    fig = make_subplots(rows=3, cols=2, subplot_titles=names,
+                        vertical_spacing=0.12, horizontal_spacing=0.10)
 
     for i, name in enumerate(names):
         row, col = divmod(i, 2)
@@ -641,11 +723,11 @@ def plot_trade_paths(results):
     fig.update_layout(
         title=dict(text=f"Saldo Comercial — % do PIB Anual ({direction} de {abs(shock):.1f}%)",
                    font=dict(size=15)),
-        height=600, template="plotly_white",
+        height=850, template="plotly_white",
         margin=dict(t=50, b=80, l=50, r=30),
     )
     fig.update_xaxes(dtick=2)
-    fig.update_xaxes(title_text="Trimestres", row=2)
+    fig.update_xaxes(title_text="Trimestres", row=3)
     fig.update_yaxes(title_text="% PIB anual")
     return fig
 
@@ -719,15 +801,38 @@ def plot_fx_depreciation_bar(results):
     return fig
 
 
+def plot_oil_import_share():
+    """Bar chart: importações de petróleo como % das importações totais."""
+    names = list(COUNTRIES.keys())
+    shares = [COUNTRIES[n]["trade"]["oil_import_bn"] / COUNTRIES[n]["trade"]["total_imports_bn"] * 100 for n in names]
+    colors = [COUNTRIES[n]["color"] for n in names]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=names, y=shares,
+        marker_color=colors, opacity=0.85,
+        text=[f"{s:.1f}%" for s in shares],
+        textposition="outside", textfont=dict(size=13, weight="bold"),
+    ))
+    fig.update_layout(
+        title=dict(text="Importações de Petróleo como % das Importações Totais", font=dict(size=15)),
+        yaxis_title="% das importações totais",
+        height=420, template="plotly_white",
+        margin=dict(t=50, b=70, l=50, r=30),
+        showlegend=False,
+    )
+    return fig
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 9. TAB 4 — IRFs COM BANDAS DE CONFIANÇA
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _plot_irf_grid(results, var_prefix, title_prefix, y_label):
-    """Grid 2x2 genérico para IRFs com bandas de confiança."""
+    """Grid 3x2 genérico para IRFs com bandas de confiança."""
     names = list(results.keys())
-    fig = make_subplots(rows=2, cols=2, subplot_titles=names,
-                        vertical_spacing=0.18, horizontal_spacing=0.10)
+    fig = make_subplots(rows=3, cols=2, subplot_titles=names,
+                        vertical_spacing=0.12, horizontal_spacing=0.10)
 
     for i, name in enumerate(names):
         row, col = divmod(i, 2)
@@ -778,12 +883,12 @@ def _plot_irf_grid(results, var_prefix, title_prefix, y_label):
     fig.update_layout(
         title=dict(text=f"IRF: {title_prefix} ({direction} de {abs(shock):.1f}%)",
                    font=dict(size=15)),
-        height=600, template="plotly_white",
-        legend=dict(orientation="h", yanchor="bottom", y=-0.10, xanchor="center", x=0.5),
+        height=850, template="plotly_white",
+        legend=dict(orientation="h", yanchor="bottom", y=-0.07, xanchor="center", x=0.5),
         margin=dict(t=50, b=80, l=50, r=30),
     )
     fig.update_xaxes(dtick=2)
-    fig.update_xaxes(title_text="Trimestres", row=2)
+    fig.update_xaxes(title_text="Trimestres", row=3)
     fig.update_yaxes(title_text=y_label)
     return fig
 
@@ -915,192 +1020,174 @@ def plot_us_tab(us_r):
 # 9c. TAB 7 — GUERRA UCRANIANA (dados históricos, não varia com cenário)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _cumulative_pct(values):
-    """Variação % acumulada relativa ao primeiro valor (base = 0%)."""
-    base = values[0]
-    return [(v / base - 1) * 100 for v in values]
+def build_geopolitical_table():
+    """Tabela comparativa: Δ% de Brent + moedas EM em D+0, D+7, D+14 para cada evento."""
+    data_list = GEOPOLITICAL_DATA
+
+    series = [
+        ("Brent", "brent", "#1a5276"),
+        ("USDMXN", "USDMXN", "#2980b9"),
+        ("USDCLP", "USDCLP", "#e74c3c"),
+        ("USDCOP", "USDCOP", "#f39c12"),
+        ("USDBRL", "USDBRL", "#FFD700"),
+        ("USDZAR", "USDZAR", "#27ae60"),
+    ]
+    time_labels = ["D+0", "D+7", "D+14"]
+    snap_keys = ["d0", "d7", "d14"]
+
+    # Header: Ativo | Evento1 D+0 D+7 D+14 | Evento2 D+0 D+7 D+14 | ...
+    parts = ['<table class="summary-table geo-table"><thead>']
+
+    # Row 1: event names spanning 3 cols each
+    parts.append('<tr><th class="st-country" rowspan="2">Ativo</th>')
+    for ev in data_list:
+        parts.append(f'<th colspan="3" class="geo-event-header">{ev["name"]}</th>')
+    parts.append('</tr>')
+
+    # Row 2: D+0, D+7, D+14 for each event
+    parts.append('<tr>')
+    for _ in data_list:
+        for tl in time_labels:
+            parts.append(f'<th class="geo-sub-header">{tl}</th>')
+    parts.append('</tr></thead><tbody>')
+
+    for s_name, s_key, s_color in series:
+        parts.append(f'<tr><td class="st-country">'
+                     f'<span class="st-dot" style="background:{s_color}"></span>'
+                     f'<b>{s_name}</b></td>')
+        for ev in data_list:
+            vals = ev[s_key]
+            snap = ev["snap"]
+            base_val = vals[snap["eve"]]
+            for sk in snap_keys:
+                idx = snap[sk]
+                v = vals[idx]
+                pct = (v / base_val - 1) * 100 if base_val != 0 else 0
+                css = "st-pos" if pct > 0.05 else ("st-neg" if pct < -0.05 else "")
+                parts.append(f'<td class="{css}">{pct:+.1f}%</td>')
+        parts.append('</tr>')
+
+    parts.append('</tbody></table>')
+    return ''.join(parts)
 
 
-def plot_ukraine_oil():
-    """Brent — variação % acumulada desde véspera da invasão (23/Feb/2022)."""
-    data = UKRAINE_WAR_DATA
-    dates = data["dates"]
-    cum = _cumulative_pct(data["brent"])
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=dates, y=cum, mode="lines+markers",
-        name="Brent",
-        line=dict(color="#1a5276", width=2.5),
-        marker=dict(size=7, color="#1a5276"),
-        fill="tozeroy",
-        fillcolor=hex_to_rgba("#1a5276", 0.12),
-    ))
-    fig.add_shape(
-        type="line", x0="2022-02-24", x1="2022-02-24", y0=0, y1=1,
-        yref="paper", line=dict(color="#e74c3c", width=1.5, dash="dash"),
-    )
-    fig.add_annotation(
-        x="2022-02-24", y=1, yref="paper",
-        text="Invasão (24/Fev)", showarrow=False,
-        font=dict(size=10, color="#e74c3c"), xanchor="left", yanchor="top",
-    )
-    fig.add_hline(y=0, line_dash="dash", line_color="gray", line_width=0.8)
-    fig.update_layout(
-        title=dict(
-            text=("Brent Crude — Variação % Acumulada<br>"
-                  "<span style='font-size:11px; color:#888;'>"
-                  "Base: 23/Fev/2022 (véspera da invasão russa)</span>"),
-            font=dict(size=15),
-        ),
-        xaxis_title="Data", yaxis_title="Variação acumulada (%)",
-        height=420, template="plotly_white",
-        margin=dict(t=70, b=70, l=50, r=30),
-        showlegend=False,
-    )
-    fig.update_xaxes(tickangle=-45, tickformat="%d/%b")
-    return fig
-
-
-def plot_ukraine_fx():
-    """Moedas EM — variação % acumulada vs USD desde véspera da invasão."""
-    data = UKRAINE_WAR_DATA
-    dates = data["dates"]
-
-    fx_series = {
-        "MXN (México)":        {"key": "USDMXN", "color": "#2980b9",
-                                 "dash": "solid", "symbol": "square"},
-        "CLP (Chile)":         {"key": "USDCLP", "color": "#e74c3c",
-                                 "dash": "solid", "symbol": "circle"},
-        "COP (Colômbia)":      {"key": "USDCOP", "color": "#f39c12",
-                                 "dash": "dash",  "symbol": "diamond"},
-        "ZAR (África do Sul)": {"key": "USDZAR", "color": "#27ae60",
-                                 "dash": "dot",   "symbol": "triangle-up"},
-    }
-
-    fig = go.Figure()
-    for label, spec in fx_series.items():
-        cum = _cumulative_pct(data[spec["key"]])
-        fig.add_trace(go.Scatter(
-            x=dates, y=cum, mode="lines+markers",
-            name=label,
-            line=dict(color=spec["color"], width=2.5, dash=spec["dash"]),
-            marker=dict(size=6, symbol=spec["symbol"], color=spec["color"]),
-        ))
-
-    fig.add_shape(
-        type="line", x0="2022-02-24", x1="2022-02-24", y0=0, y1=1,
-        yref="paper", line=dict(color="#e74c3c", width=1.5, dash="dash"),
-    )
-    fig.add_annotation(
-        x="2022-02-24", y=1, yref="paper",
-        text="Invasão (24/Fev)", showarrow=False,
-        font=dict(size=10, color="#e74c3c"), xanchor="left", yanchor="top",
-    )
-    fig.add_hline(y=0, line_dash="dash", line_color="gray", line_width=0.8)
-    fig.update_layout(
-        title=dict(
-            text=("Moedas EM — Depreciação % vs USD<br>"
-                  "<span style='font-size:11px; color:#888;'>"
-                  "Base: 23/Fev/2022 | Valores positivos = depreciação da moeda local</span>"),
-            font=dict(size=15),
-        ),
-        xaxis_title="Data", yaxis_title="Variação acumulada (%)",
-        height=420, template="plotly_white",
-        legend=dict(orientation="h", yanchor="bottom", y=-0.22, xanchor="center", x=0.5),
-        margin=dict(t=70, b=80, l=50, r=30),
-    )
-    fig.update_xaxes(tickangle=-45, tickformat="%d/%b")
-    return fig
-
-
-def plot_ukraine_oil_level():
-    """Brent — preço em nível (USD/bbl) durante a invasão."""
-    data = UKRAINE_WAR_DATA
-    dates = data["dates"]
-    prices = data["brent"]
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=dates, y=prices, mode="lines+markers",
-        name="Brent",
-        line=dict(color="#1a5276", width=2.5),
-        marker=dict(size=7, color="#1a5276"),
-    ))
-    fig.add_shape(
-        type="line", x0="2022-02-24", x1="2022-02-24", y0=0, y1=1,
-        yref="paper", line=dict(color="#e74c3c", width=1.5, dash="dash"),
-    )
-    fig.add_annotation(
-        x="2022-02-24", y=1, yref="paper",
-        text="Invasão (24/Fev)", showarrow=False,
-        font=dict(size=10, color="#e74c3c"), xanchor="left", yanchor="top",
-    )
-    # Linha horizontal no preço da véspera
-    fig.add_hline(y=prices[0], line_dash="dot", line_color="#888", line_width=0.8,
-                  annotation_text=f"${prices[0]:.0f}", annotation_position="bottom left",
-                  annotation_font=dict(size=9, color="#888"))
-    fig.update_layout(
-        title=dict(
-            text=("Brent Crude — Preço em Nível (USD/bbl)<br>"
-                  "<span style='font-size:11px; color:#888;'>"
-                  "23/Fev a 09/Mar/2022</span>"),
-            font=dict(size=15),
-        ),
-        xaxis_title="Data", yaxis_title="USD/bbl",
-        height=420, template="plotly_white",
-        margin=dict(t=70, b=70, l=50, r=30),
-        showlegend=False,
-    )
-    fig.update_xaxes(tickangle=-45, tickformat="%d/%b")
-    return fig
-
-
-def plot_ukraine_fx_level():
-    """Moedas EM — cotação em nível (USDXXX) durante a invasão, grid 2×2."""
-    data = UKRAINE_WAR_DATA
-    dates = data["dates"]
-
-    panels = [
-        {"title": "USDMXN (México)",        "key": "USDMXN", "color": "#2980b9"},
-        {"title": "USDCLP (Chile)",          "key": "USDCLP", "color": "#e74c3c"},
-        {"title": "USDCOP (Colômbia)",       "key": "USDCOP", "color": "#f39c12"},
-        {"title": "USDZAR (África do Sul)",  "key": "USDZAR", "color": "#27ae60"},
+def plot_fx_distribution():
+    """3 painéis (D+0, D+7, D+14): distribuição dos efeitos cambiais across events."""
+    data_list = GEOPOLITICAL_DATA
+    currencies = [
+        ("MXN", "USDMXN", "#2980b9"),
+        ("CLP", "USDCLP", "#e74c3c"),
+        ("COP", "USDCOP", "#f39c12"),
+        ("BRL", "USDBRL", "#FFD700"),
+        ("ZAR", "USDZAR", "#27ae60"),
+    ]
+    horizons = [
+        ("D+0 (Dia do Choque)", "d0"),
+        ("D+7", "d7"),
+        ("D+14", "d14"),
     ]
 
     fig = make_subplots(
-        rows=2, cols=2,
-        subplot_titles=[p["title"] for p in panels],
-        vertical_spacing=0.20, horizontal_spacing=0.10,
+        rows=1, cols=3,
+        subplot_titles=[h[0] for h in horizons],
+        horizontal_spacing=0.08,
     )
 
-    positions = [(1, 1), (1, 2), (2, 1), (2, 2)]
-    for panel, (row, col) in zip(panels, positions):
-        values = data[panel["key"]]
-        fig.add_trace(go.Scatter(
-            x=dates, y=values, mode="lines+markers",
-            line=dict(color=panel["color"], width=2.5),
-            marker=dict(size=5, color=panel["color"]),
-            showlegend=False,
-        ), row=row, col=col)
-        # Linha vertical na invasão — usando xref/yref do subplot
-        fig.add_shape(
-            type="line", x0="2022-02-24", x1="2022-02-24", y0=0, y1=1,
-            yref="y domain", line=dict(color="#e74c3c", width=1, dash="dash"),
-            row=row, col=col,
-        )
+    for col_idx, (h_label, h_key) in enumerate(horizons, 1):
+        for ccy_name, ccy_key, ccy_color in currencies:
+            # Coletar Δ% para esta moeda neste horizonte, across all events
+            pct_vals = []
+            for ev in data_list:
+                vals = ev[ccy_key]
+                snap = ev["snap"]
+                base = vals[snap["eve"]]
+                v = vals[snap[h_key]]
+                pct_vals.append((v / base - 1) * 100 if base != 0 else 0)
+
+            arr = np.array(pct_vals)
+            mn, mx = arr.min(), arr.max()
+            p20, p80 = np.percentile(arr, 20), np.percentile(arr, 80)
+            med = np.median(arr)
+            mean = arr.mean()
+
+            show_leg = (col_idx == 1)
+
+            # Whisker: min to max (thin line)
+            fig.add_trace(go.Scatter(
+                x=[mn, mx], y=[ccy_name, ccy_name],
+                mode="lines",
+                line=dict(color=ccy_color, width=1.5),
+                showlegend=False, hoverinfo="skip",
+            ), row=1, col=col_idx)
+
+            # Min/Max caps
+            fig.add_trace(go.Scatter(
+                x=[mn, mx], y=[ccy_name, ccy_name],
+                mode="markers",
+                marker=dict(color=ccy_color, size=8, symbol="line-ns-open",
+                            line=dict(width=1.5)),
+                showlegend=False,
+                hovertemplate=(f"<b>{ccy_name}</b><br>"
+                               f"Min: {mn:+.2f}%<br>Max: {mx:+.2f}%<extra></extra>"),
+            ), row=1, col=col_idx)
+
+            # P20–P80 range (thick bar)
+            fig.add_trace(go.Scatter(
+                x=[p20, p80], y=[ccy_name, ccy_name],
+                mode="lines",
+                line=dict(color=ccy_color, width=14),
+                opacity=0.40,
+                showlegend=False,
+                hovertemplate=(f"<b>{ccy_name}</b><br>"
+                               f"P20: {p20:+.2f}%<br>P80: {p80:+.2f}%<extra></extra>"),
+            ), row=1, col=col_idx)
+
+            # Median (circle)
+            fig.add_trace(go.Scatter(
+                x=[med], y=[ccy_name],
+                mode="markers",
+                marker=dict(color="white", size=10, symbol="circle",
+                            line=dict(color=ccy_color, width=2.5)),
+                name="Mediana" if (show_leg and ccy_name == "MXN") else "",
+                showlegend=(show_leg and ccy_name == "MXN"),
+                legendgroup="median",
+                hovertemplate=(f"<b>{ccy_name}</b><br>"
+                               f"Mediana: {med:+.2f}%<extra></extra>"),
+            ), row=1, col=col_idx)
+
+            # Mean (diamond)
+            fig.add_trace(go.Scatter(
+                x=[mean], y=[ccy_name],
+                mode="markers",
+                marker=dict(color=ccy_color, size=9, symbol="diamond"),
+                name="Média" if (show_leg and ccy_name == "MXN") else "",
+                showlegend=(show_leg and ccy_name == "MXN"),
+                legendgroup="mean",
+                hovertemplate=(f"<b>{ccy_name}</b><br>"
+                               f"Média: {mean:+.2f}%<extra></extra>"),
+            ), row=1, col=col_idx)
+
+        # Linha vertical em 0%
+        fig.add_vline(x=0, line_dash="dash", line_color="#aaa", line_width=0.8,
+                      row=1, col=col_idx)
 
     fig.update_layout(
         title=dict(
-            text=("Moedas EM — Cotação em Nível (USDXXX)<br>"
+            text=(f"Distribuição dos Efeitos Cambiais — {len(data_list)} Choques Geopolíticos<br>"
                   "<span style='font-size:11px; color:#888;'>"
-                  "23/Fev a 09/Mar/2022</span>"),
-            font=dict(size=15),
+                  "Barra: P20–P80 | Whisker: Min–Max | "
+                  "◇ Média | ○ Mediana | "
+                  "Valores positivos = depreciação da moeda local</span>"),
+            font=dict(size=14),
         ),
-        height=600, template="plotly_white",
-        margin=dict(t=70, b=80, l=50, r=30),
+        height=350, template="plotly_white",
+        legend=dict(orientation="h", yanchor="bottom", y=-0.20,
+                    xanchor="center", x=0.5),
+        margin=dict(t=80, b=60, l=50, r=20),
     )
-    fig.update_xaxes(tickangle=-45, tickformat="%d/%b")
+    fig.update_xaxes(title_text="Δ% vs véspera", zeroline=True)
+    fig.update_yaxes(autorange="reversed")
+
     return fig
 
 
@@ -1115,6 +1202,8 @@ REFERENCES = {
         {"autor": "Banco de la República (Colômbia)", "titulo": "Commodity Price Shocks and Inflation within An Optimal Monetary Policy Framework", "ref": "Borradores de Economía No. 858", "ano": 2014, "url": "https://www.banrep.gov.co/en/borrador-858"},
         {"autor": "Banxico (México)", "titulo": "Quarterly Inflation Report / Monetary Policy Statements", "ref": "Relatórios periódicos sobre pass-through energético", "ano": 2024, "url": "https://www.banxico.org.mx/publicaciones-y-prensa/informes-trimestrales/"},
         {"autor": "South African Reserve Bank", "titulo": "Monetary Policy Review / Oil price transmission studies", "ref": "SARB Occasional Bulletins", "ano": 2024, "url": "https://www.resbank.co.za/en/home/publications/review"},
+        {"autor": "Banco Central do Brasil", "titulo": "Relatório de Inflação — Análise de pass-through de preços de combustíveis", "ref": "Relatório de Inflação (vários trimestres)", "ano": 2024, "url": "https://www.bcb.gov.br/publicacoes/ri"},
+        {"autor": "Correa, A. & Minella, A.", "titulo": "Nonlinear Mechanisms of the Exchange Rate Pass-Through", "ref": "BCB Working Paper 556", "ano": 2012, "url": "https://www.bcb.gov.br/pec/wps/ingl/wps556.pdf"},
     ],
     "FMI / World Bank": [
         {"autor": "Baba, C. & Lee, J.", "titulo": "Second-Round Effects of Oil Price Shocks", "ref": "IMF WP/22/173", "ano": 2022, "url": "https://www.imf.org/-/media/Files/Publications/WP/2022/English/wpiea2022173-print-pdf.ashx"},
@@ -1143,6 +1232,13 @@ REFERENCES = {
         {"autor": "Kilian, L.", "titulo": "Not All Oil Price Shocks Are Alike: Disentangling Demand and Supply Shocks", "ref": "AER 99(3)", "ano": 2009, "url": "https://www.aeaweb.org/articles?id=10.1257/aer.99.3.1053"},
         {"autor": "Hamilton, J.", "titulo": "Causes and Consequences of the Oil Shock of 2007-08", "ref": "Brookings Papers on Economic Activity", "ano": 2009, "url": "https://www.brookings.edu/wp-content/uploads/2016/07/2009a_bpea_hamilton-1.pdf"},
     ],
+    "Calibração Brasil": [
+        {"autor": "IPEA", "titulo": "Carta de Conjuntura — Impactos de choques de commodities na economia brasileira", "ref": "Carta de Conjuntura (vários números)", "ano": 2024, "url": "https://www.ipea.gov.br/cartadeconjuntura/"},
+        {"autor": "IPEA", "titulo": "Impactos macroeconômicos de variações nos preços do petróleo sobre a economia brasileira", "ref": "Texto para Discussão", "ano": 2023, "url": "https://www.ipea.gov.br/portal/publicacoes"},
+        {"autor": "Ministério da Fazenda / SPE", "titulo": "Receitas governamentais do setor de petróleo e gás", "ref": "Boletim de Receitas de Petróleo", "ano": 2024, "url": "https://www.gov.br/fazenda/pt-br"},
+        {"autor": "ANP", "titulo": "Anuário Estatístico Brasileiro do Petróleo, Gás Natural e Biocombustíveis", "ref": "Anuário Estatístico 2024", "ano": 2024, "url": "https://www.gov.br/anp/pt-br/centrais-de-conteudo/publicacoes/anuario-estatistico"},
+        {"autor": "Petrobras", "titulo": "Relatório de Produção e Vendas / Política de Preços", "ref": "RI Petrobras", "ano": 2024, "url": "https://www.investidorpetrobras.com.br/"},
+    ],
     "Literatura Acadêmica": [
         {"autor": "Tandfonline (2025)", "titulo": "Oil price passthrough to consumer price inflation in South Africa: the role of the inflation environment", "ref": "Latin American Economic Review", "ano": 2025, "url": "https://www.tandfonline.com/doi/full/10.1080/15140326.2025.2509228"},
         {"autor": "MDPI (2024)", "titulo": "Comparative Analysis of VAR and SVAR Models — Oil Price Shocks in South Africa", "ref": "Econometrics 13(1):8", "ano": 2024, "url": "https://www.mdpi.com/2225-1146/13/1/8"},
@@ -1150,9 +1246,10 @@ REFERENCES = {
         {"autor": "IDB", "titulo": "Fuel-Price Shocks and Inflation in Latin America and the Caribbean", "ref": "Inter-American Development Bank", "ano": 2023, "url": "https://publications.iadb.org/publications/english/document/fuel-price-shocks-and-inflation-in-latin-america-and-the-caribbean-january-2023.pdf"},
     ],
     "Dados e Estatísticas": [
-        {"autor": "OEC World", "titulo": "Trade data — Chile, México, Colômbia, África do Sul", "ref": "Observatory of Economic Complexity", "ano": 2024, "url": "https://oec.world/"},
+        {"autor": "OEC World", "titulo": "Trade data — Chile, México, Colômbia, Brasil, África do Sul", "ref": "Observatory of Economic Complexity", "ano": 2024, "url": "https://oec.world/"},
         {"autor": "IEA", "titulo": "Oil balances and energy statistics", "ref": "International Energy Agency", "ano": 2024, "url": "https://www.iea.org/countries/"},
-        {"autor": "PEMEX / ANH / EIA", "titulo": "Oil production and export data", "ref": "Agências nacionais de petróleo", "ano": 2024, "url": ""},
+        {"autor": "PEMEX / ANH / ANP / EIA", "titulo": "Oil production and export data", "ref": "Agências nacionais de petróleo", "ano": 2024, "url": ""},
+        {"autor": "MDIC / Comex Stat", "titulo": "Balança comercial brasileira — Petróleo e derivados", "ref": "Ministério da Indústria e Comércio", "ano": 2024, "url": "https://comexstat.mdic.gov.br/"},
     ],
 }
 
@@ -1240,18 +1337,35 @@ def compute_summary_table(results, us_results=None):
 
 
 def df_to_html_table(df):
-    """Converte DataFrame em tabela HTML formatada."""
-    parts = ['<table><tr>']
-    parts.append(f'<th>{df.index.name or ""}</th>')
+    """Converte DataFrame em tabela HTML formatada com design profissional."""
+    country_colors = {
+        "Chile": "#e74c3c", "México": "#2980b9",
+        "Colômbia": "#f39c12", "Brasil": "#FFD700",
+        "África do Sul": "#27ae60", "EUA": "#1a5276",
+    }
+
+    parts = ['<table class="summary-table"><thead><tr>']
+    parts.append(f'<th class="st-country">{df.index.name or ""}</th>')
     for col in df.columns:
         parts.append(f'<th>{col}</th>')
-    parts.append('</tr>')
+    parts.append('</tr></thead><tbody>')
+
     for idx, row in df.iterrows():
-        parts.append(f'<tr><td><b>{idx}</b></td>')
+        color = country_colors.get(idx, "#333")
+        parts.append(f'<tr><td class="st-country">'
+                     f'<span class="st-dot" style="background:{color}"></span>'
+                     f'<b>{idx}</b></td>')
         for val in row:
-            parts.append(f'<td>{val}</td>')
+            css = ""
+            s = str(val).strip()
+            if s.startswith("+") and s != "+0.00" and s != "+0.00%":
+                css = ' class="st-pos"'
+            elif s.startswith("-"):
+                css = ' class="st-neg"'
+            parts.append(f'<td{css}>{val}</td>')
         parts.append('</tr>')
-    parts.append('</table>')
+
+    parts.append('</tbody></table>')
     return ''.join(parts)
 
 
@@ -1261,8 +1375,8 @@ def df_to_html_table(df):
 
 CHART_IDS = [
     "chart-infl-paths",
-    "chart-gdp-paths", "chart-gdp-channels",
-    "chart-trade-paths", "chart-trade-waterfall", "chart-fx-depreciation",
+    "chart-gdp-paths",
+    "chart-trade-paths", "chart-trade-waterfall", "chart-fx-depreciation", "chart-oil-import-share",
     "chart-irf-infl", "chart-irf-gdp",
     "chart-us-panel",
 ]
@@ -1274,10 +1388,10 @@ def generate_all_charts(results, us_results):
     return {
         "chart-infl-paths": to_div(plot_inflation_paths(results)),
         "chart-gdp-paths": to_div(plot_gdp_paths(results)),
-        "chart-gdp-channels": to_div(plot_gdp_channels(results)),
         "chart-trade-paths": to_div(plot_trade_paths(results)),
         "chart-trade-waterfall": to_div(plot_trade_waterfall(results)),
         "chart-fx-depreciation": to_div(plot_fx_depreciation_bar(results)),
+        "chart-oil-import-share": to_div(plot_oil_import_share()),
         "chart-irf-infl": to_div(plot_irf_inflation(results)),
         "chart-irf-gdp": to_div(plot_irf_gdp(results)),
         "chart-us-panel": to_div(plot_us_tab(us_results)),
@@ -1291,12 +1405,10 @@ def build_html_dashboard():
 
     references_html = build_references_html()
 
-    # Pré-renderizar aba Guerra Ucraniana (estática, não depende do cenário)
+    # Pré-renderizar aba Choques Geopolíticos (estática, não depende do cenário)
     _to_div = lambda fig: pio.to_html(fig, full_html=False, include_plotlyjs=False)
-    ukraine_oil_html = _to_div(plot_ukraine_oil())
-    ukraine_fx_html = _to_div(plot_ukraine_fx())
-    ukraine_oil_level_html = _to_div(plot_ukraine_oil_level())
-    ukraine_fx_level_html = _to_div(plot_ukraine_fx_level())
+    geopolitical_table_html = build_geopolitical_table()
+    fx_dist_html = _to_div(plot_fx_distribution())
 
     # Pré-computar todos os cenários (slider de $5 em $5)
     all_slider = []
@@ -1373,7 +1485,7 @@ def build_html_dashboard():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Choque no Petróleo — Dashboard EM</title>
+<title>Oil Shock: EM Effects</title>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <style>
   body {{
@@ -1489,13 +1601,58 @@ def build_html_dashboard():
   th, td {{ border: 1px solid #ddd; padding: 7px 10px; text-align: center; }}
   th {{ background: #2c3e50; color: #fff; font-weight: 600; font-size: 11px; }}
   tr:nth-child(even) {{ background: #f8f9fa; }}
+  /* ── Summary Table ── */
+  .summary-table {{
+    border-collapse: separate; border-spacing: 0;
+    border-radius: 8px; overflow: hidden;
+    box-shadow: 0 1px 6px rgba(0,0,0,0.08);
+    font-size: 13px; margin: 0;
+  }}
+  .summary-table thead th {{
+    background: #1a252f; color: #ecf0f1;
+    padding: 10px 14px; font-weight: 600; font-size: 11.5px;
+    text-transform: uppercase; letter-spacing: 0.3px;
+    border: none; border-bottom: 2px solid #2980b9;
+  }}
+  .summary-table tbody td {{
+    padding: 10px 14px; border: none;
+    border-bottom: 1px solid #eee; font-variant-numeric: tabular-nums;
+    font-family: 'Consolas', 'SF Mono', monospace; font-size: 13px;
+  }}
+  .summary-table tbody tr:last-child td {{ border-bottom: none; }}
+  .summary-table tbody tr:nth-child(even) {{ background: #f7f9fb; }}
+  .summary-table tbody tr:hover {{ background: #eaf2f8; transition: background 0.15s; }}
+  .summary-table .st-country {{
+    text-align: left; font-family: 'Segoe UI', sans-serif;
+    white-space: nowrap;
+  }}
+  .summary-table .st-dot {{
+    display: inline-block; width: 8px; height: 8px;
+    border-radius: 50%; margin-right: 6px; vertical-align: middle;
+  }}
+  .summary-table .st-pos {{ color: #c0392b; font-weight: 600; }}
+  .summary-table .st-neg {{ color: #27ae60; font-weight: 600; }}
+  /* ── Geopolitical table ── */
+  .geo-table {{ font-size: 12px; }}
+  .geo-table .geo-event-header {{
+    background: #1a252f; color: #ecf0f1; text-align: center;
+    border-left: 2px solid #2980b9; font-size: 11px;
+  }}
+  .geo-table .geo-sub-header {{
+    background: #2c3e50; color: #bdc3c7; font-size: 10px;
+    text-transform: uppercase; letter-spacing: 0.5px; padding: 6px 8px;
+  }}
+  .geo-table tbody td {{
+    padding: 8px 10px; font-size: 12px; text-align: center;
+    min-width: 60px;
+  }}
   .chart-container {{ margin: 15px 0; }}
   .timestamp {{ color: #999; font-size: 12px; }}
   .source-note {{ font-size: 11px; color: #888; margin-top: 2px; font-style: italic; }}
 </style>
 </head>
 <body>
-<h1>Choque no Preço do Petróleo — Impacto em Mercados Emergentes</h1>
+<h1>Oil Shock: EM Effects</h1>
 <p class="timestamp">Gerado em: {datetime.now().strftime("%Y-%m-%d %H:%M")} | Base: ${BASELINE_OIL_PRICE:.0f}/bbl</p>
 
 <div class="simulator">
@@ -1532,18 +1689,18 @@ def build_html_dashboard():
     <button class="tab-btn" onclick="openTab(event, 'comercio')">Balança Comercial</button>
     <button class="tab-btn" onclick="openTab(event, 'irf')">Impulso-Resposta</button>
     <button class="tab-btn" onclick="openTab(event, 'eua')" style="border-left: 2px solid #1a5276; font-weight: 700;">EUA</button>
-    <button class="tab-btn" onclick="openTab(event, 'guerra-ucrania')" style="border-left: 2px solid #c0392b;">Guerra Ucraniana</button>
+    <button class="tab-btn" onclick="openTab(event, 'choques-geo')" style="border-left: 2px solid #c0392b;">Choques Geopolíticos</button>
     <button class="tab-btn" onclick="openTab(event, 'referencias')">Referências</button>
   </div>
 
   <div id="inflacao" class="tab-content active">
     <div class="chart-container">{''.join(chart_divs["chart-infl-paths"])}</div>
-    <p class="source-note">Fontes: BCCh WP 747; Banxico; Banco de la República; Tandfonline (2025).</p>
+    <p class="source-note">Fontes: BCCh WP 747; Banxico; Banco de la República; BCB; Tandfonline (2025).</p>
   </div>
 
   <div id="crescimento" class="tab-content">
     <div class="chart-container">{''.join(chart_divs["chart-gdp-paths"])}</div>
-    <p class="source-note">Fontes: FLAR (2024); IMF WP/17/15; Fed DSGE (2024). Colômbia positiva (exportador).</p>
+    <p class="source-note">Fontes: FLAR (2024); IMF WP/17/15; Fed DSGE (2024); IPEA. Colômbia e Brasil positivos (exportadores).</p>
   </div>
 
   <div id="comercio" class="tab-content">
@@ -1553,6 +1710,8 @@ def build_html_dashboard():
     <p class="source-note">Saldo acumulado Q0–Q4 como % do PIB anual. Fonte: IMF WEO (2024).</p>
     <div class="chart-container">{''.join(chart_divs["chart-fx-depreciation"])}</div>
     <p class="source-note">Depreciação % ≈ −Δ Conta Petróleo Líquida (acum. Q0–Q4) / PIB. Valores positivos = pressão de depreciação; negativos = pressão de apreciação (exportadores).</p>
+    <div class="chart-container">{''.join(chart_divs["chart-oil-import-share"])}</div>
+    <p class="source-note">Fontes: OEC World (2024); WITS/UN Comtrade; DANE; PEMEX; ANP; MDIC/Comex Stat.</p>
   </div>
 
   <div id="irf" class="tab-content">
@@ -1567,19 +1726,17 @@ def build_html_dashboard():
     <p class="source-note">Fontes: Presno & Prestipino (FEDS Notes 2024); Kilian & Zhou (Dallas Fed 2023); Gagliardone & Gertler (NBER 2023); Oladosu et al. (2018); IMF WP 2025/145; Kanzig (AER 2021).</p>
   </div>
 
-  <div id="guerra-ucrania" class="tab-content">
+  <div id="choques-geo" class="tab-content">
     <div style="background: #fdf2f2; border-left: 4px solid #c0392b; padding: 10px 16px; margin-bottom: 15px; border-radius: 0 5px 5px 0; font-size: 13px;">
-      <strong>Contexto:</strong> A Rússia invadiu a Ucrânia em 24/Fev/2022. O Brent atingiu ~$128/bbl em 8/Mar.
-      Esta aba mostra dados históricos reais — não varia com o simulador de cenários acima.
+      <strong>Choques Geopolíticos (2022–2024):</strong> Variação % do Brent e moedas EM em D+0, D+7 e D+14
+      após cada evento (vs véspera). Dados de fechamento diário — não varia com o simulador de cenários.
     </div>
-    <div class="chart-container">{ukraine_oil_html}</div>
-    <p class="source-note">Fonte: oil.xlsx. Período: 23/Fev a 09/Mar/2022.</p>
-    <div class="chart-container">{ukraine_fx_html}</div>
-    <p class="source-note">Fonte: fx.xlsx. Valores positivos = depreciação da moeda local vs USD.</p>
-    <div class="chart-container">{ukraine_oil_level_html}</div>
-    <p class="source-note">Brent Crude em nível (USD/bbl). Fonte: oil.xlsx.</p>
-    <div class="chart-container">{ukraine_fx_level_html}</div>
-    <p class="source-note">Cotações em nível (USDXXX). Fonte: fx.xlsx.</p>
+    <div class="summary-box" style="margin-bottom: 20px; overflow-x: auto;">
+      {geopolitical_table_html}
+      <p class="source-note" style="margin-top: 8px;">Variações % relativas à véspera de cada evento. Fontes: oil.xlsx (Brent), fx.xlsx (câmbio). Valores positivos em moedas = depreciação da moeda local vs USD.</p>
+    </div>
+    <div class="chart-container">{fx_dist_html}</div>
+    <p class="source-note">Distribuição across {len(GEOPOLITICAL_EVENTS)} eventos geopolíticos (2022–2024). Barra = intervalo P20–P80; whiskers = min–max.</p>
   </div>
 
   <div id="referencias" class="tab-content">
